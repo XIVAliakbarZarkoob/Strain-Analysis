@@ -1,0 +1,112 @@
+clc clear
+close all 
+format long g
+pathfile = 'Data.txt';
+[lon,lat,VE,VN,SVE,SVN,Cor] = read_file(pathfile);
+[Area] = xy2area(lon,lat);
+Area = Area(:,1);
+Data = [lon,lat,VE,VN,SVE,SVN,Cor,Area];%% --- Grid ---
+lat1 = 24:0.25:43;lon1 = 40:0.25:64;
+[lon_grid,lat_grid] = meshgrid(lon1,lat1);% plot(lon_grid,lat_grid,'.r')
+e = referenceEllipsoid('GRS80','m');
+
+%% --- LS ---
+tic
+for j = 1:size(lat_grid,1)
+    for k = 1:size(lat_grid,2)        
+        [arclen,az] = distance(lat_grid(j,k),lon_grid(j,k),lat,lon, e);        
+        d_lim = mean(arclen) + 2.5 * std(arclen); %m
+        idx_rmv = find(arclen > d_lim);        
+        Data(idx_rmv,:) = [];
+        arclen(idx_rmv) = [];        
+        az(idx_rmv) = [];
+        dX = arclen .* sind(az);        
+        dY = arclen .* cosd(az);
+
+        y = zeros(2*length(dX),1);        
+        A = zeros(length(y), 6);
+        y(1:2:end-1) = Data(:,3) / 1000;        
+        y(2:2:end) = Data(:,4) / 1000;
+        A(1:2:end-1,1) = dX;        
+        A(1:2:end-1,2) = dY;
+        A(1:2:end-1,3) = 0;        
+        A(1:2:end-1,4) = dY;
+        A(1:2:end-1,5) = 1;        
+        A(1:2:end-1,6) = 0;
+        A(2:2:end,1) = 0;
+        A(2:2:end,2) = dX;        
+        A(2:2:end,3) = dY;
+        A(2:2:end,4) = -dX;        
+        A(2:2:end,5) = 0;
+        A(2:2:end,6) = 1;
+
+        area = Data(:,end);
+        n = length(area);        
+        Z_temp = n * area / sum(area);
+
+        r = sqrt((dX.^2+dY.^2)) / 1000000;
+        D = optD(r);    %D = 3.9;
+        L_temp = exp(-(r.^2)/(D^2));        
+        L = zeros(2*length(L_temp),1);
+        Z = zeros(2*length(L_temp),1);        
+        L(1:2:end-1) = L_temp;
+        L(2:2:end) = L_temp;        
+        Z(1:2:end-1) = Z_temp;
+        Z(2:2:end) = Z_temp;        
+%         for i = 1:length(L_temp)%             L(2*i-1) = L_temp(i);
+%             L(2*i) = L_temp(i);% 
+%             Z(2*i-1) = Z_temp(i);%             Z(2*i) = Z_temp(i);
+%         end
+        % Z = ones(size(L));
+        C = zeros(length(y));        
+        for i = 1:size(Data,1)
+            C(2*i-1, 2*i-1) = Data(i, 5)^2;            
+            C(2*i, 2*i) = Data(i, 6)^2;
+            C(2*i,2*i-1) = Data(i,7)*Data(i,6)*Data(i,5);            
+            C(2*i-1,2*i) = Data(i,7)*Data(i,6)*Data(i,5);
+        end
+        G = L .* Z;%         G = L;
+        W = inv(C) * diag(G);        
+        Xhat = lscov(A, y, W, 'chol');
+        exx(j,k) = Xhat(1);
+        exy(j,k) = Xhat(2);        
+        eyy(j,k) = Xhat(3);
+        w(j,k) = Xhat(4);        
+        Cx(j,k) = Xhat(5);
+        Cy(j,k) = Xhat(6);        
+        Data = [lon,lat,VE,VN,SVE,SVN,Cor,Area];
+    end
+end
+toc
+%%Z = reshape((exx+eyy+exy)/3,[],1)*1e6;
+X = reshape(lon_grid,[],1);Y = reshape(lat_grid,[],1);
+
+figure()
+grid on
+hold on
+worldmap([24,43],[40,64]);
+plotm(lat,lon,'or');
+xlabel('Longitude')
+ylabel('Latitude')
+title('DEM')
+colorbar
+
+figure()
+grid on
+hold on
+scatter(X, Y,10,Z,'filled')
+xlabel('Longitude')
+ylabel('Latitude')
+title('DEM')
+colorbar
+
+figure
+hold on
+worldmap([23,44],[39,65]);
+surfm(Y,X,Z)
+title('Strain')
+coast = load('coast');
+hold on  
+plotm(coast.lat,coast.long,'k-');
+colorbar
+hold off

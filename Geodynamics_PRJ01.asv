@@ -1,0 +1,352 @@
+%% Aliakbar Zarkoob, AKA "XIV"
+%  Gmail: XIV.Aliakbar.Zarkoob@gmail.com
+%  Telegram: @XIVAliakbar
+
+clc, clear, close all, beep off, format long g
+set(groot,'defaultTextInterpreter','latex');
+set(groot,'defaultAxesTickLabelInterpreter','latex');
+set(groot,'defaultLegendInterpreter','latex');
+set(groot,'defaultColorbarTickLabelInterpreter','latex');
+
+%% Load data & Initialization
+
+FONTSIZE = 14;
+
+data = readtable("GPS_data_GeoDynamics.xlsx","NumHeaderLines",2,"FileType","spreadsheet", ...
+    "VariableNamingRule","preserve","TextType","string");
+
+data.("Long(°E)") = data.("Long(°E)")/10000;
+data.("Lat(°N)") = data.("Lat(°N)")/10000;
+% Velocity Units: m/year
+data.("Evel") = data.Evel.double/1000;
+data.("Nvel") = data.Nvel.double/1000;
+data.("SigVe") = data.SigVe.double/1000;
+data.("SigVn") = data.SigVn.double/1000;
+data.("Cor") = data.Cor.double;
+
+%% Main
+
+INTERVAL = 0.5; % unit: degrees
+LAT = (24:INTERVAL:43)';
+LNG = (40:INTERVAL:64)';
+[LAT,LNG] = meshgrid(LAT,LNG);
+
+lat = LAT(:); lng = LNG(:);
+gps_num = height(data);
+m = gps_num*2; % total observation number
+n = 6;
+
+% GPS stations Latitude and Longitude 
+% (used for distance and azimuth calculations)
+dlat = repmat(data.("Lat(°N)"),size(lat,1),1);
+dlng = repmat(data.("Long(°E)"),size(lat,1),1);
+
+% Grid Latitude and Longitude 
+% (used for distance and azimuth calculations)
+lat = repelem(lat,gps_num);
+lng = repelem(lng,gps_num);
+
+% Calculating Distance and Azimuth from each point in grid to each GPS
+% station (with wgs84 as the reference ellipsoid)
+wgs84 = wgs84Ellipsoid("meter");
+[Dist,Az] = distance([lat lng],[dlat dlng],wgs84);
+Dx = Dist.*sind(Az);
+Dy = Dist.*cosd(Az);
+
+% Variance-Covariance matrix of observations
+C = zeros(m);
+C(1:2:end,1:2:end) = diag(data.SigVe.^2);
+C(2:2:end,2:2:end) = diag(data.SigVn.^2);
+C(2:2:end,1:2:end) = diag(data.SigVe.*data.SigVn.*data.Cor);
+C(1:2:end,2:2:end) = diag(data.SigVe.*data.SigVn.*data.Cor);
+
+% Design matrix
+A = zeros(size(Dist,1)*2,n);
+A(1:2:end,1) = Dx;
+A(2:2:end,2) = Dy;
+A(1:2:end,3) = Dy;
+A(2:2:end,3) = Dx;
+A(1:2:end,4) = Dy;
+A(2:2:end,4) = -Dx;
+A(1:2:end,5) = 1;
+A(2:2:end,6) = 1;
+
+% Observation vector
+Y = [data.Evel';data.Nvel'];
+Y = reshape(Y,[],1);
+
+% Clustering weight
+vlat = data.("Lat(°N)");
+vlng = data.("Long(°E)");
+[V,P,ll] = VoronoiLimit(vlng,vlat,"figure","on");
+% ylim([23,32]); xlim([49,55])
+vor_area = zeros(size(P,1),1);
+for k = 1:length(P)
+    v1 = V(P{k},1) ;
+    v2 = V(P{k},2) ;
+    vor_area(k,1) = polyarea(v1,v2);
+end
+Z = size(vor_area,1).*vor_area/sum(vor_area);
+Z = repelem(Z,2);
+
+
+R = repelem(Dist/1000,2); % used for Distance weight
+x_hat = zeros(6,size(LAT(:),1));
+for i = 1:size(LAT(:),1)
+
+    % Maximum distance for GPS stations to be used in LS
+    Dist_i = repelem(Dist(i*gps_num-(gps_num-1):i*gps_num),2);
+    THRESHOLD = mean(Dist_i) + 2.5*std(Dist_i);
+    index = Dist_i > THRESHOLD;
+
+    % Clustering Weight
+    Zi = Z; Zi(index) = [];
+
+    % Distance Weight
+    D(i) =  (mean(Dist_i) + 1.5*std(Dist_i))/10000; %#ok<SAGROW>
+    L = exp(-R.^2/D(i)^2);
+    Li = L(i*m-(m-1):i*m);
+    Li(index) = [];
+
+    % Total Weight matrix
+    Ci = C; Ci(index,:) = []; Ci(:,index) = [];
+    W = inv(Ci).*Li.*Zi;
+
+    % Design matrix & observation vector
+    Ai = A(i*m-(m-1):i*m,:);
+    Ai(index,:) = [];
+    Yi = Y; Yi(index) = [];
+
+    x_hat(:,i) = inv(Ai'*W*Ai)*Ai'*W*Yi; %#ok<MINV>
+    % x_hat(:,i) = lscov(Ai,Yi,W,"chol");
+
+end
+clc
+
+D = reshape(D,size(LAT));
+eps_xx = reshape(x_hat(1,:),size(LAT));
+eps_yy = reshape(x_hat(2,:),size(LAT));
+eps_xy = reshape(x_hat(3,:),size(LAT));
+I1 = eps_xx + eps_yy;
+I2 = eps_xx.*eps_yy - eps_xy.^2;
+
+eps1 = zeros(size(x_hat,2),1); eps2 = eps1; theta = eps1;
+for i = 1:size(x_hat,2)
+    EPS = [x_hat(1,i) x_hat(3,i); x_hat(3,i) x_hat(2,i)];
+    pEPS = eig(EPS);
+    eps1(i) = pEPS(2);
+    eps2(i) = pEPS(1);
+    theta(i) = 0.5*atan2(2*x_hat(3,i),(x_hat(1,i)-x_hat(2,i)));
+end
+eps1 = reshape(eps1,size(LAT));
+eps2 = reshape(eps2,size(LAT));
+theta = reshape(theta,size(LAT));
+
+result.Latitude = LAT;
+result.Longitude = LNG;
+result.eps_xx = eps_xx;
+result.eps_yy = eps_yy;
+result.eps_xy = eps_xy;
+result.eps1 = eps1;
+result.eps2 = eps2;
+result.theta = theta;
+result.I1 = I1;
+result.I2 = I2;
+result.D = D;
+
+clearvars -except result data
+
+%% plot & Maps
+
+coast = load('coastlines.mat');
+countries = shaperead('ne_50m_admin_0_countries.shp', 'UseGeoCoords', true);
+
+%% GPS velocity field
+
+figure
+ax = geoaxes;  
+addCustomBasemap("usgsimagery","usgsimagery.mbtiles")
+geobasemap(ax,"usgsimagery")       
+geolimits(ax,[22,45],[38,66])      
+hold(ax,'on')
+
+for k = 1:length(countries)
+    lat = countries(k).Lat;
+    lon = countries(k).Lon;
+    geoplot(ax, lat, lon, 'k', 'LineWidth', 2)
+end
+
+np = 50;
+for i =1:numel(data.("Long(°E)"))
+    plot_arrow_geoplot([data.("Lat(°N)")(i) ,data.("Long(°E)")(i)],[data.("Lat(°N)")(i)+np*data.Nvel(i) ,data.("Long(°E)")(i)+np*data.Evel(i)])
+end
+
+
+%% Normal & Shear Strain
+
+figure('Name','Normal Strain','NumberTitle','off')
+
+hold on
+subplot(1,2,1)
+worldmap([24,43],[40,64])
+contourfm(result.Latitude,result.Longitude,result.eps_xx*10^9)
+geoshow(countries, 'FaceColor', 'none', 'EdgeColor', 'k', 'LineWidth', 2);
+hcb = colorbar;
+set(get(hcb,'Ylabel'),'String', ...
+    '$\varepsilon_{xx}$   [$\frac{\mathrm{n} strain}{year}$]','Interpreter','latex', ...
+    'fontsize', FONTSIZE*1.6)
+colormap jet
+
+subplot(1,2,2)
+worldmap([24,43],[40,64])
+contourfm(result.Latitude,result.Longitude,result.eps_yy*10^9)
+geoshow(countries, 'FaceColor', 'none', 'EdgeColor', 'k', 'LineWidth', 2);
+hcb = colorbar;
+set(get(hcb,'Ylabel'),'String', ...
+    '$\varepsilon_{yy}$   [$\frac{\mathrm{n} strain}{year}$]','Interpreter','latex', ...
+    'fontsize', FONTSIZE*1.6)
+colormap jet
+
+sgtitle("Normal Strain Maps", 'fontsize', FONTSIZE*1.2)
+
+
+figure('Name','Shear Strain','NumberTitle','off')
+
+worldmap([24,43],[40,64])
+contourfm(result.Latitude,result.Longitude,result.eps_xy*10^9)
+geoshow(countries, 'FaceColor', 'none', 'EdgeColor', 'k', 'LineWidth', 2);
+hcb = colorbar;
+set(get(hcb,'Ylabel'),'String', ...
+    '$\varepsilon_{xy}$   [$\frac{\mathrm{n} strain}{year}$]','Interpreter','latex', ...
+    'fontsize', FONTSIZE*1.6)
+colormap jet
+title("Shear Strain Map", "fontsize", FONTSIZE*1.2)
+
+%% Principal Strains
+
+figure('Name','Principal Strains','NumberTitle','off')
+
+hold on
+subplot(1,2,1)
+worldmap([24,43],[40,64])
+contourfm(result.Latitude,result.Longitude,result.eps1*10^9)
+geoshow(countries, 'FaceColor', 'none', 'EdgeColor', 'k', 'LineWidth', 2);
+hcb = colorbar;
+set(get(hcb,'Ylabel'),'String', ...
+    '$\varepsilon_{1}$   [$\frac{\mathrm{n} strain}{year}$]','Interpreter','latex', ...
+    'fontsize', FONTSIZE*1.6)
+colormap jet
+
+subplot(1,2,2)
+worldmap([24,43],[40,64])
+contourfm(result.Latitude,result.Longitude,result.eps2*10^9)
+geoshow(countries, 'FaceColor', 'none', 'EdgeColor', 'k', 'LineWidth', 2);
+hcb = colorbar;
+set(get(hcb,'Ylabel'),'String', ...
+    '$\varepsilon_{2}$   [$\frac{\mathrm{n} strain}{year}$]','Interpreter','latex', ...
+    'fontsize', FONTSIZE*1.6)
+colormap jet
+
+sgtitle("Principal Strain Maps", "fontsize", FONTSIZE*1.2)
+
+%% Strain Invariants
+
+figure('Name','Strain Invariants','NumberTitle','off')
+hold on
+subplot(1,2,1)
+worldmap([24,43],[40,64])
+contourfm(result.Latitude,result.Longitude,result.I1*10^9)
+geoshow(countries, 'FaceColor', 'none', 'EdgeColor', 'k', 'LineWidth', 2);
+hcb = colorbar;
+set(get(hcb,'Ylabel'), ...
+    'String','$I_{1}$   [$\frac{\mathrm{n} strain}{year}$]','Interpreter','latex', ...
+    'fontsize', FONTSIZE*1.6)
+colormap jet
+
+subplot(1,2,2)
+worldmap([24,43],[40,64])
+contourfm(result.Latitude,result.Longitude,result.I2*10^18)
+geoshow(countries, 'FaceColor', 'none', 'EdgeColor', 'k', 'LineWidth', 2);
+hcb = colorbar;
+set(get(hcb,'Ylabel'), ...
+    'String','$I_{2}$   [$\frac{\mathrm{n} strain}{year}$]','Interpreter','latex', ...
+    'fontsize', FONTSIZE*1.6)
+colormap jet
+
+sgtitle("Strain Invariant Maps", "fontsize", FONTSIZE*1.2)
+
+%% Strain Ellipse
+
+lat = result.Latitude(:);
+lng = result.Longitude(:);
+eps1 = result.eps1(:);
+eps2 = result.eps2(:);
+theta = result.theta(:);
+
+land = shaperead('landareas', 'UseGeoCoords', true); 
+
+onLand = false(size(lat));
+for k = 1:length(land)
+    x = land(k).Lon;
+    y = land(k).Lat;
+    in = inpolygon(lng, lat, x, y);  
+    onLand = onLand | in;  
+end
+
+figure('Name','Strain Ellipse','NumberTitle','off')
+worldmap([24,43],[40,64])
+geoshow(countries, 'FaceColor', 0.8*ones(3,1), 'EdgeColor', 'k', 'LineWidth', 2);
+title("Strain Ellipse")
+hold on
+
+for i = 1:size(lat,1)
+
+    if ~onLand(i)
+        continue 
+    end
+
+    SCALE = 2*10^7;
+    c = [lat(i);lng(i)];
+    eps1i = eps1(i)*SCALE;
+    eps2i = eps2(i)*SCALE;
+    thetai = theta(i);
+
+    ax1s = [-abs(eps1i);0]; ax1e = [abs(eps1i);0];
+    ax2s = [0;-abs(eps2i)]; ax2e = [0;abs(eps2i)];
+    R = [cos(thetai) -sin(thetai); sin(thetai) cos(thetai)];
+
+    ax1s = R*ax1s; ax1e = R*ax1e;
+    ax2s = R*ax2s; ax2e = R*ax2e;
+    ax1s = c+ax1s; ax1e = c+ax1e;
+    ax2s = c+ax2s; ax2e = c+ax2e;
+
+    if eps1(i) > 0 
+        color1 = "r";
+    else
+        color1 = "b";
+    end
+    if eps2(i) > 0
+        color2 = "r";
+    else
+        color2 = "b";
+    end
+    % Red:Tension   &  Blue: Tension
+    plotm([ax1s(1) ax1e(1)],[ax1s(2) ax1e(2)],"Color",color1,"LineWidth",2)
+    plotm([ax2s(1) ax2e(1)],[ax2s(2) ax2e(2)],"Color",color2,"LineWidth",2)
+
+end
+xlabel("Longitude"), ylabel("Latitude")
+title({'Blue: Compression', 'Red: Tension'}, 'fontsize', FONTSIZE*1.6)
+
+
+%% Extra 
+
+worldmap([24,43],[40,64])
+contourfm(result.Latitude,result.Longitude,result.D)
+colormap('cool')
+geoshow(countries, 'FaceColor', 'none', 'EdgeColor', 'k', 'LineWidth', 2);
+hcb = colorbar;
+set(get(hcb,'Ylabel'), ...
+    'String','$km$','Interpreter','latex', ...
+    'fontsize', FONTSIZE*1.4)
+title("D parameter used for weighting by distace")
